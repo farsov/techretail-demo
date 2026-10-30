@@ -1,0 +1,12 @@
+# Dependencias y compilados
+node_modules/
+dist/
+target/
+.angular/
+# Secretos y archivos locales: nunca se versionan
+.env
+*.pem
+*.key
+.idea/
+.vscode/
+.DS_Store

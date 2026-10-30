@@ -1,0 +1,5 @@
+{
+  "plantilla": "spring-boot-angular",
+  "version_plantilla": "3",
+  "backend": "spring_boot"
+}

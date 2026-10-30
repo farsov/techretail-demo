@@ -1,0 +1,2 @@
+# Registro de módulos: cada rama agrega su línea y la fusión conserva las de todas.
+frontend/src/app/modulos.routes.ts merge=union

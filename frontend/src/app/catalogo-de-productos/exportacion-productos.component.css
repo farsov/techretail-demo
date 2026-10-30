@@ -1,0 +1,25 @@
+section {
+  max-width: 40rem;
+  padding: 1rem;
+}
+
+form {
+  display: grid;
+  gap: 0.5rem;
+}
+
+input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.5rem;
+}
+
+button {
+  justify-self: start;
+  margin-top: 1rem;
+  padding: 0.6rem 1rem;
+}
+
+[role='alert'] {
+  color: #a12020;
+}

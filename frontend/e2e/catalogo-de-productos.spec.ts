@@ -99,7 +99,6 @@ function zipSinCompresion(archivos: Record<string, string>): Buffer {
   return Buffer.concat([...locales, directorio, fin]);
 }
 
-// Lee el XLSX de prueba (ZIP sin comprimir) para comprobar las celdas descargadas por el navegador.
 function xmlHoja(libro: Buffer): string {
   let posicion = 0;
   while (posicion + 30 <= libro.length && libro.readUInt32LE(posicion) === 0x04034b50) {
@@ -291,6 +290,188 @@ test('HU-123/CL-6: si la API deniega el permiso, la pantalla informa y no descar
   const descargas: string[] = [];
   page.on('download', (descarga) => descargas.push(descarga.suggestedFilename()));
   await page.getByRole('button', { name: 'Descargar Excel' }).click();
+  await expect(page.getByRole('alert')).toContainText('No tienes permiso para exportar');
+  expect(solicitudes).toBe(1);
+  expect(descargas).toEqual([]);
+  await expect(page.getByRole('status')).toHaveCount(0);
+});
+
+// HU-124: escenarios CSV; sin endpoint de altas, el navegador recibe datos de contrato controlados.
+const rutaCsv = '/api/productos/exportaciones/csv';
+const cabeceraCsv =
+  'codigo,nombre_comercial,categoria,subcategoria,precio_base,moneda,stock,estado\r\n';
+const filasCsv =
+  'CAF-901,Café,Bebidas,Molido,9999999999999.99,EUR,2147483647,ACTIVO\r\n' +
+  'TE-902,Té,Bebidas,Infusiones,0.01,EUR,0,INACTIVO\r\n';
+
+async function simularCsv(page: Page, csv: string, verificar: (url: URL) => void): Promise<void> {
+  await simularSesion(page);
+  await page.route('**' + rutaCsv + '*', (interceptada) => {
+    expect(interceptada.request().method()).toBe('GET');
+    expect(interceptada.request().headers()['authorization']).toBe('Bearer token-de-prueba');
+    verificar(new URL(interceptada.request().url()));
+    return interceptada.fulfill({
+      status: 200,
+      headers: {
+        'content-type': 'text/csv; charset=UTF-8',
+        'content-disposition': 'attachment; filename="productos.csv"',
+      },
+      body: Buffer.from(csv, 'utf8'),
+    });
+  });
+  await page.goto('/catalogo-de-productos/csv');
+}
+
+async function descargarCsv(page: Page): Promise<{ nombre: string; bytes: Buffer }> {
+  const evento = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Descargar CSV' }).click();
+  const descarga = await evento;
+  const flujo = await descarga.createReadStream();
+  expect(flujo).not.toBeNull();
+  const trozos: Buffer[] = [];
+  for await (const trozo of flujo!) trozos.push(Buffer.from(trozo));
+  return { nombre: descarga.suggestedFilename(), bytes: Buffer.concat(trozos) };
+}
+
+test('HU-124/C1: dado el catálogo sin filtros, al exportar se descarga un CSV con productos', async ({
+  page,
+}) => {
+  let solicitudes = 0;
+  await simularCsv(page, cabeceraCsv + filasCsv, (url) => {
+    solicitudes++;
+    expect(url.pathname).toBe(rutaCsv);
+    expect(url.search).toBe('');
+  });
+  const archivo = await descargarCsv(page);
+  expect(archivo.nombre).toBe('productos.csv');
+  expect(archivo.bytes).toEqual(Buffer.from(cabeceraCsv + filasCsv, 'utf8'));
+  expect(solicitudes).toBe(1);
+  await expect(page.getByRole('status')).toContainText('Se ha iniciado la descarga');
+});
+
+test('HU-124/C2: dados productos con precio base y stock, el CSV filtrado conserva los valores registrados', async ({
+  page,
+}) => {
+  const filtros = { categoria: 'Bebidas', subcategoria: 'Molido', estado: 'ACTIVO' };
+  const registrado =
+    cabeceraCsv + 'CAF-901,Café,Bebidas,Molido,9999999999999.99,EUR,2147483647,ACTIVO\r\n';
+  let solicitudes = 0;
+  await simularCsv(page, registrado, (url) => {
+    solicitudes++;
+    expect(url.pathname).toBe(rutaCsv);
+    expect(Object.fromEntries(url.searchParams)).toEqual(filtros);
+  });
+  for (const [etiqueta, valor] of [
+    ['Categoría', filtros.categoria],
+    ['Subcategoría', filtros.subcategoria],
+    ['Estado', filtros.estado],
+  ])
+    await page.getByLabel(etiqueta, { exact: true }).fill(valor);
+  const archivo = await descargarCsv(page);
+  expect(archivo.nombre).toBe('productos.csv');
+  expect(archivo.bytes.toString('utf8')).toBe(registrado);
+  expect(archivo.bytes.toString('utf8')).toContain(',9999999999999.99,EUR,2147483647,ACTIVO\r\n');
+  expect(solicitudes).toBe(1);
+});
+
+test('HU-124/CL-1: dado un filtro sin coincidencias, se descarga un CSV válido solo con cabecera', async ({
+  page,
+}) => {
+  let solicitudes = 0;
+  await simularCsv(page, cabeceraCsv, (url) => {
+    solicitudes++;
+    expect(url.pathname).toBe(rutaCsv);
+    expect([...url.searchParams]).toEqual([['categoria', 'Sin coincidencias']]);
+  });
+  await page.getByLabel('Categoría', { exact: true }).fill('Sin coincidencias');
+  const archivo = await descargarCsv(page);
+  expect(archivo.nombre).toBe('productos.csv');
+  expect(archivo.bytes).toEqual(Buffer.from(cabeceraCsv, 'utf8'));
+  expect(solicitudes).toBe(1);
+  await expect(page.getByRole('status')).toContainText('Se ha iniciado la descarga');
+});
+
+test('HU-124/CL-3: dado un estado no permitido, la API devuelve 400 sin entregar CSV', async ({
+  request,
+}) => {
+  const sesion = await request.get('/api/dev/token?usuario=gestor-e2e&roles=GESTOR_PRODUCTOS');
+  expect(sesion.ok()).toBeTruthy();
+  const { token } = await sesion.json();
+  const respuesta = await request.get(rutaCsv, {
+    params: { estado: 'DESCONOCIDO' },
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  expect(respuesta.status()).toBe(400);
+  expect(respuesta.headers()['content-type']).toContain('application/problem+json');
+  expect(respuesta.headers()['content-disposition']).toBeUndefined();
+  expect(await respuesta.json()).toEqual(
+    expect.objectContaining({
+      status: 400,
+      title: expect.any(String),
+      detail: expect.stringContaining('estado'),
+    }),
+  );
+});
+
+test('HU-124/CL-4: sin autenticación la API real rechaza el CSV con ProblemDetail 401', async ({
+  request,
+}) => {
+  const respuesta = await request.get(rutaCsv);
+  expect(respuesta.status()).toBe(401);
+  expect(respuesta.headers()['content-type']).toContain('application/problem+json');
+  expect(respuesta.headers()['content-disposition']).toBeUndefined();
+  expect(await respuesta.json()).toEqual(
+    expect.objectContaining({ status: 401, title: expect.any(String), detail: expect.any(String) }),
+  );
+});
+
+test('HU-124/CL-4: sin permiso ni siquiera aplicando filtros la API entrega un archivo', async ({
+  request,
+}) => {
+  const sesion = await request.get('/api/dev/token?usuario=lector-e2e&roles=LECTOR');
+  expect(sesion.ok()).toBeTruthy();
+  const { token } = await sesion.json();
+  for (const params of [{}, { categoria: 'Bebidas', estado: 'ACTIVO' }]) {
+    const respuesta = await request.get(rutaCsv, {
+      params,
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(respuesta.status()).toBe(403);
+    expect(respuesta.headers()['content-type']).toContain('application/problem+json');
+    expect(respuesta.headers()['content-disposition']).toBeUndefined();
+    expect(await respuesta.json()).toEqual(
+      expect.objectContaining({
+        status: 403,
+        title: expect.any(String),
+        detail: expect.stringContaining('permiso'),
+      }),
+    );
+  }
+});
+
+test('HU-124/CL-4: si la API deniega el acceso, la pantalla informa sin iniciar descarga', async ({
+  page,
+}) => {
+  await simularSesion(page);
+  let solicitudes = 0;
+  await page.route('**' + rutaCsv + '*', (interceptada) => {
+    solicitudes++;
+    expect(interceptada.request().headers()['authorization']).toBe('Bearer token-de-prueba');
+    return interceptada.fulfill({
+      status: 403,
+      contentType: 'application/problem+json',
+      body: JSON.stringify({
+        type: 'urn:problema:catalogo:acceso-denegado',
+        title: 'Acceso denegado',
+        status: 403,
+        detail: 'No tienes permiso para exportar el catálogo de productos.',
+      }),
+    });
+  });
+  await page.goto('/catalogo-de-productos/csv');
+  const descargas: string[] = [];
+  page.on('download', (archivo) => descargas.push(archivo.suggestedFilename()));
+  await page.getByRole('button', { name: 'Descargar CSV' }).click();
   await expect(page.getByRole('alert')).toContainText('No tienes permiso para exportar');
   expect(solicitudes).toBe(1);
   expect(descargas).toEqual([]);

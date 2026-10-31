@@ -2,9 +2,6 @@ package com.fabrica.app.catalogodeproductos;
 
 import java.io.IOException;
 import java.io.OutputStream;
-import java.io.OutputStreamWriter;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
 import java.util.Set;
 
 import com.fabrica.app.infra.auth.Usuario;
@@ -17,10 +14,9 @@ public class ExportacionCsvService {
 
     private static final String GESTOR_PRODUCTOS = "GESTOR_PRODUCTOS";
     private static final Set<String> ESTADOS_PERMITIDOS = Set.of("ACTIVO", "INACTIVO");
-    private static final String CABECERA =
-            "codigo,nombre_comercial,categoria,subcategoria,precio_base,moneda,stock,estado\r\n";
 
     private final ProductoExportacionRepository repositorio;
+    private final ProductoCsvWriter escritor = new ProductoCsvWriter();
 
     public ExportacionCsvService(ProductoExportacionRepository repositorio) {
         this.repositorio = repositorio;
@@ -66,54 +62,11 @@ public class ExportacionCsvService {
         if (filtros == null) {
             throw new IllegalArgumentException("Se necesitan filtros de exportación.");
         }
-        OutputStreamWriter escritor = new OutputStreamWriter(salida, StandardCharsets.UTF_8);
-        escritor.write(CABECERA);
-        try {
-            repositorio.recorrer(usuario, filtros.categoria(), filtros.subcategoria(), filtros.estado(),
-                    (producto, cb, solicitante) -> {
-                        comprobarPermiso(solicitante);
-                        return cb.conjunction();
-                    }, fila -> {
-                        try {
-                            escribirFila(escritor, fila);
-                        } catch (IOException error) {
-                            throw new UncheckedIOException(error);
-                        }
-                    });
-            escritor.flush();
-        } catch (UncheckedIOException error) {
-            throw error.getCause();
-        }
-    }
-
-    private static void escribirFila(OutputStreamWriter escritor, ProductoExportacionFila fila)
-            throws IOException {
-        escritor.write(escapar(fila.codigo()));
-        escritor.write(',');
-        escritor.write(escapar(fila.nombreComercial()));
-        escritor.write(',');
-        escritor.write(escapar(fila.categoria()));
-        escritor.write(',');
-        escritor.write(escapar(fila.subcategoria()));
-        escritor.write(',');
-        escritor.write(fila.precioBase() == null ? "" : fila.precioBase().toPlainString());
-        escritor.write(',');
-        escritor.write(escapar(fila.moneda()));
-        escritor.write(',');
-        escritor.write(fila.stock() == null ? "" : fila.stock().toString());
-        escritor.write(',');
-        escritor.write(escapar(fila.estado()));
-        escritor.write("\r\n");
-    }
-
-    private static String escapar(String valor) {
-        if (valor == null) {
-            return "";
-        }
-        if (valor.indexOf(',') >= 0 || valor.indexOf('"') >= 0 || valor.indexOf('\n') >= 0
-                || valor.indexOf('\r') >= 0) {
-            return '"' + valor.replace("\"", "\"\"") + '"';
-        }
-        return valor;
+        escritor.escribir(salida, consumidor -> repositorio.recorrer(usuario,
+                filtros.categoria(), filtros.subcategoria(), filtros.estado(),
+                (producto, cb, solicitante) -> {
+                    comprobarPermiso(solicitante);
+                    return cb.conjunction();
+                }, consumidor));
     }
 }

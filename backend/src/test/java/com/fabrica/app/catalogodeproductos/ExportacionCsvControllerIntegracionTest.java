@@ -24,6 +24,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
+/** Contrato HTTP real con autenticación, base de datos y descarga asíncrona. */
 @SpringBootTest
 @AutoConfigureMockMvc
 class ExportacionCsvControllerIntegracionTest {
@@ -46,17 +47,18 @@ class ExportacionCsvControllerIntegracionTest {
     }
 
     @Test
-    void hu_124_c1_sin_filtros_obtiene_csv_con_productos_del_catalogo() throws Exception {
-        String csv = descargar(peticionGestor());
-        assertThat(csv).startsWith(CABECERA);
-        assertThat(csv).contains("C-401,Cafetera,Electrodomésticos,Cocina,");
-        assertThat(csv).contains("C-402,Tetera,Electrodomésticos,Cocina,");
-        assertThat(csv.split("\r\n")).hasSize(3);
+    void hu_124_c1_sin_filtros_descarga_csv_con_productos_del_catalogo() throws Exception {
+        MvcResult resultado = descargar(peticionGestor());
+        assertThat(resultado.getResponse().getContentAsByteArray()).isEqualTo((CABECERA
+                + "C-401,Cafetera,Electrodomésticos,Cocina,9999999999999.99,EUR,2147483647,ACTIVO\r\n"
+                + "C-402,Tetera,Electrodomésticos,Cocina,0.01,EUR,0,INACTIVO\r\n")
+                .getBytes(StandardCharsets.UTF_8));
     }
 
     @Test
-    void hu_124_c2_los_precios_base_y_existencias_coinciden_con_los_registrados() throws Exception {
-        String csv = descargar(peticionGestor());
+    void hu_124_c2_precios_base_y_existencias_coinciden_con_los_datos_registrados() throws Exception {
+        String csv = new String(descargar(peticionGestor()).getResponse().getContentAsByteArray(),
+                StandardCharsets.UTF_8);
         for (long id : new long[] {401L, 402L}) {
             String codigo = jdbc.queryForObject("select codigo from productos where id = ?", String.class, id);
             BigDecimal precio = jdbc.queryForObject("select precio_base from productos where id = ?",
@@ -68,32 +70,39 @@ class ExportacionCsvControllerIntegracionTest {
     }
 
     @Test
-    void filtros_combinados_restringen_resultados_y_sin_coincidencias_entregan_solo_cabecera()
+    void filtros_combinados_restringen_productos_y_sin_coincidencias_entregan_solo_cabecera()
             throws Exception {
-        assertThat(descargar(peticionGestor().param("categoria", "Electrodomésticos")
-                .param("subcategoria", "Cocina").param("estado", "ACTIVO")))
-                .contains("C-401,").doesNotContain("C-402,");
-        assertThat(descargar(peticionGestor().param("estado", "ACTIVO")
-                .param("categoria", "Sin productos"))).isEqualTo(CABECERA);
+        String filtrado = new String(descargar(peticionGestor().param("categoria", "Electrodomésticos")
+                .param("subcategoria", "Cocina").param("estado", "ACTIVO"))
+                .getResponse().getContentAsByteArray(), StandardCharsets.UTF_8);
+        assertThat(filtrado).isEqualTo(CABECERA
+                + "C-401,Cafetera,Electrodomésticos,Cocina,9999999999999.99,EUR,2147483647,ACTIVO\r\n");
+        assertThat(descargar(peticionGestor().param("categoria", "Sin productos"))
+                .getResponse().getContentAsByteArray()).isEqualTo(CABECERA.getBytes(StandardCharsets.UTF_8));
     }
 
     @Test
-    void filtros_invalidos_reciben_400_problem_detail_y_no_reciben_archivo() throws Exception {
+    void filtros_invalidos_reciben_400_problem_detail_sin_archivo() throws Exception {
         comprobarFiltroInvalido("categoria", " ");
         comprobarFiltroInvalido("categoria", "a".repeat(121));
         comprobarFiltroInvalido("subcategoria", "");
         comprobarFiltroInvalido("subcategoria", "s".repeat(121));
+        comprobarFiltroInvalido("estado", "");
         comprobarFiltroInvalido("estado", "a".repeat(21));
         comprobarFiltroInvalido("estado", "DESCONOCIDO");
     }
 
     @Test
-    void sin_autenticacion_recibe_401_y_sin_permiso_o_con_filtro_no_autorizado_recibe_403()
-            throws Exception {
+    void sin_autenticacion_recibe_401_problem_detail_sin_archivo() throws Exception {
         comprobarProblema(get(RUTA), 401);
         comprobarProblema(get(RUTA).header(HttpHeaders.AUTHORIZATION, "Bearer token-invalido"), 401);
-        comprobarProblema(get(RUTA).header(HttpHeaders.AUTHORIZATION, "Bearer " + token("LECTOR")), 403);
-        comprobarProblema(get(RUTA).header(HttpHeaders.AUTHORIZATION, "Bearer " + token("LECTOR"))
+    }
+
+    @Test
+    void sin_permiso_de_exportacion_o_de_aplicar_filtro_recibe_403_sin_archivo() throws Exception {
+        String lector = token("LECTOR");
+        comprobarProblema(get(RUTA).header(HttpHeaders.AUTHORIZATION, "Bearer " + lector), 403);
+        comprobarProblema(get(RUTA).header(HttpHeaders.AUTHORIZATION, "Bearer " + lector)
                 .param("estado", "ACTIVO"), 403);
     }
 
@@ -107,23 +116,24 @@ class ExportacionCsvControllerIntegracionTest {
         MvcResult resultado = mockMvc.perform(peticion)
                 .andExpect(status().is(codigo))
                 .andExpect(content().contentTypeCompatibleWith("application/problem+json"))
+                .andExpect(jsonPath("$.type").isString())
                 .andExpect(jsonPath("$.title").isString())
                 .andExpect(jsonPath("$.status").value(codigo))
                 .andExpect(jsonPath("$.detail").isString())
                 .andReturn();
         assertThat(resultado.getResponse().getHeader(HttpHeaders.CONTENT_DISPOSITION)).isNull();
+        assertThat(resultado.getResponse().getContentAsString()).doesNotContain("codigo,nombre_comercial");
         return resultado;
     }
 
-    private String descargar(MockHttpServletRequestBuilder peticion) throws Exception {
+    private MvcResult descargar(MockHttpServletRequestBuilder peticion) throws Exception {
         MvcResult inicio = mockMvc.perform(peticion).andExpect(request().asyncStarted()).andReturn();
-        MvcResult fin = mockMvc.perform(asyncDispatch(inicio))
+        return mockMvc.perform(asyncDispatch(inicio))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith("text/csv"))
                 .andExpect(header().string(HttpHeaders.CONTENT_DISPOSITION,
                         "attachment; filename=\"productos.csv\""))
                 .andReturn();
-        return new String(fin.getResponse().getContentAsByteArray(), StandardCharsets.UTF_8);
     }
 
     private MockHttpServletRequestBuilder peticionGestor() throws Exception {

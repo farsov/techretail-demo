@@ -21,8 +21,9 @@ public class ProblemaAutenticacionExportacionFilter extends OncePerRequestFilter
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest peticion) {
-        return !peticion.getRequestURI().substring(peticion.getContextPath().length())
-                .equals("/api/productos/exportaciones/excel");
+        String ruta = peticion.getRequestURI().substring(peticion.getContextPath().length());
+        return !ruta.equals("/api/productos/exportaciones/excel")
+                && !ruta.equals("/api/productos/exportaciones/csv");
     }
 
     @Override

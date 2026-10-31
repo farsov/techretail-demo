@@ -6,4 +6,9 @@ export const routes: Routes = [
     loadComponent: () =>
       import('./exportacion-productos.component').then((m) => m.ExportacionProductosComponent),
   },
+  {
+    path: 'csv',
+    loadComponent: () =>
+      import('./exportacion-csv.component').then((m) => m.ExportacionCsvComponent),
+  },
 ];

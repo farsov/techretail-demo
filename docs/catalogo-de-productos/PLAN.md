@@ -1,0 +1,30 @@
+# Plan de implementación — exportación Excel del catálogo (REQ-056, HU-123)
+
+## Contrato y alcance
+
+El contrato obligatorio es [SPEC.md](SPEC.md): únicamente `GET /api/productos/exportaciones/excel`, con filtros opcionales `codigo`, `nombre_comercial`, `categoria`, `subcategoria` y `estado`. Responde con un `.xlsx` (`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, `Content-Disposition: attachment; filename="catalogo-productos.xlsx"`) o con `ProblemDetail` en los errores 400, 401 y 403. No se incluyen operaciones de mantenimiento o consulta independientes, CSV ni `historial_cambios_producto`.
+
+## Estado de las integraciones existentes
+
+La plantilla contiene autenticación en `com.fabrica.app.infra.auth`: `FiltroAutenticacion` protege `/api/**` y proporciona `Usuario` mediante `@RequestAttribute(Usuario.ATRIBUTO)`; `Usuario` expone `sub()`, `roles()` y `tieneRol(...)`. El frontend ya adjunta el token mediante su interceptor. El backend dispone de JPA y de H2/PostgreSQL configurados mediante variables de entorno. **No existe todavía en los archivos disponibles un modelo `productos`, un repositorio de productos ni una política de permisos de consulta/exportación.** Por ello, no se presupone el nombre de ningún rol ni el criterio de visibilidad: antes de implementar el endpoint hay que identificar la fuente de datos y la política de acceso vigentes o definirlas explícitamente con el responsable del catálogo. No se debe sustituir esta verificación por un filtro de estado, por una comprobación solo en Angular ni por un rol inventado.
+
+## Modelo de lectura
+
+- Reutilizar la fuente persistida de `productos` y su identidad; si aún no existe, definir el mapeo JPA mínimo requerido para leer las columnas contratadas, sin crear endpoints de altas, cambios ni consultas independientes. El registro de lectura representa un único producto con `id`, `codigo`, `nombre_comercial`, `descripcion`, `categoria`, `subcategoria`, `precio_base`, `moneda`, `stock`, `imagen` y `estado`. Determinar los tipos y la nulabilidad a partir del esquema real antes de mapearlo; no fabricar valores faltantes.
+- Separar el mapeo persistente de una proyección/DTO de exportación inmutable que contenga exclusivamente esas once columnas y no se exponga como entidad JPA. Obtener cada proyección de un registro coherente del producto, sin mezclar versiones anteriores y posteriores de sus campos (CL-7).
+- Consultar solo los campos exportables. Mantener `precio_base` con su precisión almacenada y `stock` con su valor registrado, sin redondeos ni sustituciones (CL-3). No leer ni exportar `historial_cambios_producto`.
+- Aplicar los filtros opcionales sobre sus campos homónimos y **combinar siempre** el predicado de visibilidad del usuario con todos los filtros, incluido `estado`; sin filtros se usa igualmente el predicado de visibilidad (CL-1, CL-5). Definir la semántica concreta de coincidencia de filtros conforme a la consulta existente del catálogo, sin introducir supuestos de búsqueda no recogidos por el contrato.
+- Procesar resultados en lotes o mediante cursor/stream de JPA con transacción de solo lectura, liberando recursos y evitando materializar el catálogo entero; conservar coherencia de cada fila durante la lectura. Ordenar de manera estable para que la paginación, si se utiliza, no omita ni duplique registros.
+
+## Capas previstas (paquete `com.fabrica.app.catalogodeproductos`)
+
+1. `controller`: recibir y validar los cinco parámetros con DTO y Jakarta Validation (`maxLength`: 64, 255, 120, 120 y 20 respectivamente); rechazar valores inválidos, incluidos estados no admitidos por el catálogo, con 400 y `ProblemDetail`. Obtener el usuario autenticado desde el atributo de la petición; delegar la exportación, establecer los encabezados y el tipo MIME del contrato. La ausencia de token queda a cargo del filtro existente (401); no añadir autenticación propia.
+2. `service`: comprobar el permiso de exportación en **cada** solicitud, antes de consultar o generar el archivo, y devolver 403 con `ProblemDetail` en español si falta. Reutilizar la política de consulta existente para acotar los productos autorizados; la autorización no debe depender de los filtros recibidos. Coordinar la lectura y la escritura del Excel.
+3. `repository` / `entity` / `dto`: reutilizar el mapeo de productos y construir una consulta de lectura con predicados de autorización y filtros conjuntamente, que entregue la proyección por lotes; no devolver entidades por la API. Mantener la lectura consistente por producto aun si se modifica durante la exportación.
+4. Escritor de Excel: crear un libro `.xlsx` con las cabeceras exactamente en este orden: `id`, `codigo`, `nombre_comercial`, `descripcion`, `categoria`, `subcategoria`, `precio_base`, `moneda`, `stock`, `imagen`, `estado`. Escribir una fila por producto autorizado; si no hay resultados, generar un libro válido con solo cabeceras (CL-2). Escribir textos como cadenas literales, nunca como fórmulas, incluso si comienzan por `=`, `+`, `-` o `@` (CL-8). Usar escritura de bajo consumo de memoria; evaluar una biblioteca XLSX con soporte de escritura por flujo solo cuando se implemente esta capa, ya que la plantilla no incluye una.
+
+## Verificación al implementar
+
+- Pruebas unitarias de permisos, filtros, proyección y escritura (tipos de celda, cabeceras, valor exacto del precio y del stock, texto parecido a fórmula, archivo vacío y consistencia por fila).
+- Pruebas de integración del endpoint con token de desarrollo para C1 (sin filtros, con filtros y sin resultados) y C2 (precio y stock registrados); comprobar MIME, disposición y contenido real del `.xlsx`, además de 400 por longitud/valor inválido, 401 sin token y 403 sin permiso. Comprobar que un filtro por estado no expone productos no autorizados.
+- Documentar con la política real los roles/permisos admitidos y la regla de visibilidad antes de cerrar la implementación; no dar por cumplida HU-123 mientras falte esta integración o la fuente de `productos`.

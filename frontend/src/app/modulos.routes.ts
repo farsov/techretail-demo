@@ -5,4 +5,5 @@ import { Routes } from '@angular/router';
 // Ejemplo: { path: 'vacaciones', loadChildren: () => import('./vacaciones/vacaciones.routes').then((m) => m.routes) },
 // prettier-ignore
 export const rutasDeModulos: Routes = [
+  { path: 'catalogo-de-productos', loadChildren: () => import('./catalogo-de-productos/catalogo-de-productos.routes').then((m) => m.routes) },
 ];
